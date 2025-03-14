@@ -9,9 +9,9 @@ from modular_engine.module_registry import get_registry
 
 class ModuleListView(ListView):
     """View to list all available modules and their status"""
-    template_name = 'engine/module_list.html'
+    template_name = 'modular_engine/module_list.html'
     context_object_name = 'modules'
-    
+
     def get_queryset(self):
         registry = get_registry()
         return registry.get_all_modules()
@@ -21,42 +21,45 @@ class ModuleListView(ListView):
 def install_module(request, module_id):
     """View to install a module"""
     registry = get_registry()
-    
+
     success = registry.install_module(module_id)
-    
+
     if success:
-        messages.success(request, f"Module '{module_id}' installed successfully")
+        messages.success(
+            request, f"Module '{module_id}' installed successfully")
     else:
         messages.error(request, f"Failed to install module '{module_id}'")
-        
-    return redirect(reverse('engine:module_list'))
-    
+
+    return redirect(reverse('modular_engine:module_list'))
+
 
 @require_POST
 def uninstall_module(request, module_id):
     """View to uninstall a module"""
     registry = get_registry()
-    
+
     success = registry.uninstall_module(module_id)
-    
+
     if success:
-        messages.success(request, f"Module '{module_id}' uninstalled successfully")
+        messages.success(
+            request, f"Module '{module_id}' uninstalled successfully")
     else:
         messages.error(request, f"Failed to uninstall module '{module_id}'")
-        
-    return redirect(reverse('engine:module_list'))
-    
+
+    return redirect(reverse('modular_engine:module_list'))
+
 
 @require_POST
 def upgrade_module(request, module_id):
     """View to upgrade a module"""
     registry = get_registry()
-    
+
     success = registry.upgrade_module(module_id)
-    
+
     if success:
-        messages.success(request, f"Module '{module_id}' upgraded successfully")
+        messages.success(
+            request, f"Module '{module_id}' upgraded successfully")
     else:
         messages.error(request, f"Failed to upgrade module '{module_id}'")
-        
-    return redirect(reverse('engine:module_list'))
+
+    return redirect(reverse('modular_engine:module_list'))
