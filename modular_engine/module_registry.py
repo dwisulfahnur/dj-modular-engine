@@ -1,11 +1,11 @@
-import importlib
 import logging
-from django.apps import apps
+import importlib
 from django.conf import settings
 from django.urls import clear_url_caches, include, path
 from django.utils import timezone
 from django.db import connection
 from django.db import DatabaseError
+from modular_engine.models import Module
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,6 @@ class ModuleRegistry:
 
     def install_module(self, module_id):
         """Install a module and mark it as installed in the database"""
-        from modular_engine.models import Module
 
         if module_id not in self.available_modules:
             logger.error(f"Module {module_id} not found in registry")
@@ -80,7 +79,6 @@ class ModuleRegistry:
 
     def uninstall_module(self, module_id):
         """Uninstall a module and mark it as not installed in the database"""
-        from modular_engine.models import Module
 
         if module_id not in self.modules:
             logger.error(f"Module {module_id} not found in active modules")
@@ -105,7 +103,6 @@ class ModuleRegistry:
 
     def check_upgrade_available(self, module_id):
         """Check if an upgrade is available for a module"""
-        from modular_engine.models import Module
 
         if module_id not in self.available_modules:
             return False
@@ -123,7 +120,6 @@ class ModuleRegistry:
 
     def upgrade_module(self, module_id):
         """Upgrade a module to the latest version"""
-        from modular_engine.models import Module
 
         if module_id not in self.available_modules:
             logger.error(f"Module {module_id} not found in registry")
@@ -158,7 +154,6 @@ class ModuleRegistry:
 
     def get_all_modules(self):
         """Get list of all registered modules with their status"""
-        from modular_engine.models import Module
 
         result = []
 
@@ -196,8 +191,6 @@ class ModuleRegistry:
 
     def _reload_urls(self):
         """Reload URLs to include active modules"""
-        # This is a placeholder - actual URL reloading is implemented
-        # in the urlconf section using dynamic imports
         clear_url_caches()
 
 
@@ -213,23 +206,20 @@ def initialize_module_registry():
     # Check if the table exists before trying to query it
     try:
         # Load modules from the database
-        from modular_engine.models import Module
         installed_modules = Module.objects.filter(status='installed')
 
         # Register available modules from settings
         if hasattr(settings, 'AVAILABLE_MODULES'):
-            for module_config in settings.AVAILABLE_MODULES:
+            for module_id in settings.AVAILABLE_MODULES:
                 try:
-                    module_app = module_config['app_name']
-
                     # Try to import the module
-                    module = importlib.import_module(f"{module_app}.module")
+                    module = importlib.import_module(f"{module_id}.module")
 
                     # Register the module
                     if hasattr(module, 'register'):
                         module.register(registry)
                 except (ImportError, AttributeError) as e:
-                    logger.error(f"Error loading module {module_config}: {e}")
+                    logger.error(f"Error loading module {module_id}: {e}")
 
         # Activate installed modules
         for module in installed_modules:
