@@ -18,7 +18,7 @@ class ModuleListView(ListView):
 
 
 @require_POST
-def install_module(request, module_id):
+def install_module_view(request, module_id):
     """View to install a module"""
     registry = get_registry()
 
@@ -34,7 +34,7 @@ def install_module(request, module_id):
 
 
 @require_POST
-def uninstall_module(request, module_id):
+def uninstall_module_view(request, module_id):
     """View to uninstall a module"""
     registry = get_registry()
 
@@ -50,7 +50,7 @@ def uninstall_module(request, module_id):
 
 
 @require_POST
-def upgrade_module(request, module_id):
+def upgrade_module_view(request, module_id):
     """View to upgrade a module"""
     registry = get_registry()
 
