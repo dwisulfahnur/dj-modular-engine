@@ -1,0 +1,6 @@
+asgiref==3.8.1
+build==1.2.2.post1
+Django==5.1.7
+packaging==24.2
+pyproject_hooks==1.2.0
+sqlparse==0.5.3
