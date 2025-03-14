@@ -4,6 +4,8 @@ from django.apps import apps
 from django.conf import settings
 from django.urls import clear_url_caches, include, path
 from django.utils import timezone
+from django.db import connection
+from django.db import DatabaseError
 
 logger = logging.getLogger(__name__)
 
@@ -204,40 +206,47 @@ registry = ModuleRegistry()
 
 
 def initialize_module_registry():
-    """Initialize the module registry by loading modules from database"""
-    from modular_engine.models import Module
+    # Avoid database access during app initialization
+    if not connection.is_usable():
+        return
+        
+    # Check if the table exists before trying to query it
+    try:
+        # Load modules from the database
+        from modular_engine.models import Module
+        installed_modules = Module.objects.filter(status='installed')
 
-    # Load modules from the database
-    installed_modules = Module.objects.filter(status='installed')
+        # Register available modules from settings
+        if hasattr(settings, 'AVAILABLE_MODULES'):
+            for module_config in settings.AVAILABLE_MODULES:
+                try:
+                    module_app = module_config['app_name']
 
-    # Register available modules from settings
-    if hasattr(settings, 'AVAILABLE_MODULES'):
-        for module_config in settings.AVAILABLE_MODULES:
-            try:
-                module_app = module_config['app_name']
+                    # Try to import the module
+                    module = importlib.import_module(f"{module_app}.module")
 
-                # Try to import the module
-                module = importlib.import_module(f"{module_app}.module")
+                    # Register the module
+                    if hasattr(module, 'register'):
+                        module.register(registry)
+                except (ImportError, AttributeError) as e:
+                    logger.error(f"Error loading module {module_config}: {e}")
 
-                # Register the module
-                if hasattr(module, 'register'):
-                    module.register(registry)
-            except (ImportError, AttributeError) as e:
-                logger.error(f"Error loading module {module_config}: {e}")
+        # Activate installed modules
+        for module in installed_modules:
+            if module.module_id in registry.available_modules:
+                registry.modules[module.module_id] = registry.available_modules[module.module_id]
 
-    # Activate installed modules
-    for module in installed_modules:
-        if module.module_id in registry.available_modules:
-            registry.modules[module.module_id] = registry.available_modules[module.module_id]
-
-            # Check for available upgrades
-            if registry.check_upgrade_available(module.module_id):
-                module.status = 'upgrade_available'
+                # Check for available upgrades
+                if registry.check_upgrade_available(module.module_id):
+                    module.status = 'upgrade_available'
+                    module.save()
+            else:
+                # Module was installed but is no longer available
+                module.status = 'not_installed'
                 module.save()
-        else:
-            # Module was installed but is no longer available
-            module.status = 'not_installed'
-            module.save()
+    except DatabaseError:
+        # Table doesn't exist yet, migrations haven't been run
+        pass
 
     return registry
 
