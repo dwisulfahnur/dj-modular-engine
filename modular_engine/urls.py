@@ -1,7 +1,7 @@
 from django.urls import path
 from modular_engine import views
-from modular_engine.module_registry import get_module_url_patterns
-app_name = 'engine'
+
+app_name = 'modular_engine'
 
 urlpatterns = [
     path('module/', views.ModuleListView.as_view(), name='module_list'),
