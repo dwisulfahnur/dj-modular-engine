@@ -1,7 +1,7 @@
 import logging
 import importlib
 from django.conf import settings
-from django.urls import clear_url_caches, include, path
+from django.urls import clear_url_caches, include, path, get_resolver
 from django.utils import timezone
 from django.db import connection
 from django.db import DatabaseError
@@ -28,8 +28,12 @@ class ModuleRegistry:
             'setup_func': setup_func,
             'url_patterns': url_patterns,
         }
+        
+        # Mark that URLs may have changed
+        from modular_engine.signals import mark_urls_changed
+        mark_urls_changed()
 
-    def install_module(self, module_id):
+    def install_module(self, module_id, base_path=None):
         """Install a module and mark it as installed in the database"""
 
         if module_id not in self.available_modules:
@@ -49,6 +53,14 @@ class ModuleRegistry:
 
         # Check if module already exists to determine dates
         module_exists = Module.objects.filter(module_id=module_id).exists()
+        old_path = ""
+        
+        if module_exists:
+            try:
+                existing_module = Module.objects.get(module_id=module_id)
+                old_path = existing_module.base_path
+            except:
+                pass
 
         defaults = {
             'name': module_info['name'],
@@ -56,6 +68,10 @@ class ModuleRegistry:
             'version': module_info['version'],
             'status': 'installed',
         }
+
+        # If base_path is provided, save it
+        if base_path is not None:
+            defaults['base_path'] = base_path
 
         # Set dates based on whether the module exists
         if not module_exists:
@@ -71,6 +87,16 @@ class ModuleRegistry:
 
         # Add module to active modules
         self.modules[module_id] = module_info
+
+        # If base_path was provided and changed, send the signal
+        if base_path is not None and base_path != old_path:
+            from modular_engine.signals import module_path_changed
+            module_path_changed.send(
+                sender=self.__class__,
+                module_id=module_id,
+                old_path=old_path,
+                new_path=base_path
+            )
 
         # Reload URLs
         self._reload_urls()
@@ -148,6 +174,35 @@ class ModuleRegistry:
             logger.error(f"Module {module_id} not found in database")
             return False
 
+    def update_module_path(self, module_id, new_base_path):
+        """Update the base path for a module"""
+        if module_id not in self.available_modules:
+            logger.error(f"Module {module_id} not found in registry")
+            return False
+            
+        try:
+            module = Module.objects.get(module_id=module_id)
+            old_path = module.base_path
+            module.base_path = new_base_path
+            module.save()
+            
+            # Use signal to notify that the module path has changed
+            from modular_engine.signals import module_path_changed
+            module_path_changed.send(
+                sender=self.__class__, 
+                module_id=module_id, 
+                old_path=old_path, 
+                new_path=new_base_path
+            )
+            
+            # Call reload_urls for backward compatibility
+            self._reload_urls()
+            
+            return True
+        except Module.DoesNotExist:
+            logger.error(f"Module {module_id} not found in database")
+            return False
+
     def get_active_modules(self):
         """Get list of active modules"""
         return self.modules
@@ -162,12 +217,14 @@ class ModuleRegistry:
             version = module_info['version']
             install_date = None
             update_date = None
+            base_path = ''
 
             try:
                 module = Module.objects.get(module_id=module_id)
                 status = module.status
                 install_date = module.install_date
                 update_date = module.update_date
+                base_path = module.base_path
 
                 # Check if upgrade is available
                 if status == 'installed' and self.check_upgrade_available(module_id):
@@ -184,14 +241,17 @@ class ModuleRegistry:
                 'version': version,
                 'status': status,
                 'install_date': install_date,
-                'update_date': update_date
+                'update_date': update_date,
+                'base_path': base_path
             })
 
         return result
 
     def _reload_urls(self):
         """Reload URLs to include active modules"""
-        clear_url_caches()
+        # Use our more robust URL reloading mechanism
+        from modular_engine.signals import force_reload_urls
+        force_reload_urls()
 
 
 # Singleton instance of the registry
@@ -248,13 +308,39 @@ def get_registry():
 
 # Dynamic module URL patterns
 def get_module_url_patterns():
-    registry = get_registry()
+    """
+    Get URL patterns for all available modules.
+    The patterns include all registered modules that have url_patterns defined.
+    The base path for each module is determined from the Module model.
+    """
     module_patterns = []
+    registry = get_registry()
     
     # Include URL patterns for all available modules
-    # Our middleware will prevent access to uninstalled modules
     for module_id, module_info in registry.available_modules.items():
-        if module_info.get('url_patterns'):
+        if not module_info.get('url_patterns'):
+            continue
+            
+        try:
+            # Try to get the module from the database to check for custom base path
+            module = Module.objects.get(module_id=module_id)
+            
+            # Get the base path (custom or default)
+            base_path = module.get_url_path()
+            
+            # Create the URL pattern with the appropriate base path
+            if base_path == '/':
+                # Root path
+                module_patterns.append(
+                    path('', include(module_info['url_patterns']))
+                )
+            else:
+                # Regular path
+                module_patterns.append(
+                    path(f"{base_path}/", include(module_info['url_patterns']))
+                )
+        except Module.DoesNotExist:
+            # Module not in database, use module_id as path
             module_patterns.append(
                 path(f"{module_id}/", include(module_info['url_patterns']))
             )

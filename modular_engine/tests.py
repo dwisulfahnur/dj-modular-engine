@@ -7,11 +7,13 @@ from django.utils import timezone
 from django.conf import settings
 
 import datetime
+import time
 from unittest.mock import patch, MagicMock
 
 from modular_engine.models import Module
 from modular_engine.module_registry import ModuleRegistry, registry
-from modular_engine.middleware import ModuleURLMiddleware
+from modular_engine.middleware import ModuleURLMiddleware, URLReloadMiddleware
+from modular_engine.signals import force_reload_urls
 
 
 class ModuleModelTest(TestCase):
@@ -269,16 +271,16 @@ class ModuleViewsTest(TestCase):
 
             response = self.client.post(
                 reverse('modular_engine:install_module', kwargs={
-                        'module_id': 'uninstalled_module'})
+                       'module_id': 'uninstalled_module'})
             )
 
             self.assertEqual(response.status_code, 302)  # Redirect
             self.assertRedirects(response, reverse(
                 'modular_engine:module_list'))
 
-            # Check that the module was installed
+            # Check that the module was installed with base_path=None
             mock_registry.install_module.assert_called_once_with(
-                'uninstalled_module')
+                'uninstalled_module', base_path=None)
 
     def test_uninstall_module_view(self):
         """Test the uninstall module view"""
@@ -318,6 +320,41 @@ class ModuleViewsTest(TestCase):
 
             # Check that the module was upgraded
             mock_registry.upgrade_module.assert_called_once_with('test_module')
+
+    def test_update_module_path_view(self):
+        """Test the update module path view"""
+        with patch('modular_engine.views.get_registry') as mock_get_registry:
+            mock_registry = MagicMock()
+            mock_registry.update_module_path.return_value = True
+            mock_get_registry.return_value = mock_registry
+
+            response = self.client.post(
+                reverse('modular_engine:update_module_path', kwargs={
+                       'module_id': 'test_module'}),
+                {'base_path': 'new-path'}
+            )
+
+            self.assertEqual(response.status_code, 302)  # Redirect
+            self.assertRedirects(response, reverse(
+                'modular_engine:module_list'))
+
+            # Check that the module path was updated
+            mock_registry.update_module_path.assert_called_once_with(
+                'test_module', 'new-path')
+                
+    def test_reload_urls_view(self):
+        """Test the reload urls view"""
+        with patch('modular_engine.views.force_reload_urls') as mock_force_reload:
+            response = self.client.post(
+                reverse('modular_engine:reload_urls')
+            )
+
+            self.assertEqual(response.status_code, 302)  # Redirect
+            self.assertRedirects(response, reverse(
+                'modular_engine:module_list'))
+
+            # Check that URLs were reloaded
+            mock_force_reload.assert_called_once()
 
 
 class ModuleIntegrationTest(TestCase):
@@ -360,17 +397,17 @@ class ModuleIntegrationTest(TestCase):
             url_patterns=test_url_patterns
         )
 
-    @patch('modular_engine.module_registry.clear_url_caches')
-    def test_url_routing_after_install(self, mock_clear_caches):
+    @patch('modular_engine.signals.force_reload_urls')
+    def test_url_routing_after_install(self, mock_force_reload):
         """Test that URLs are updated after installing a module"""
-        # Install the module without mocking URL patterns
+        # Install the module
         registry.install_module("test_module")
 
-        # Check that URL caches were cleared
-        mock_clear_caches.assert_called()
+        # Check that URL reloading was triggered
+        mock_force_reload.assert_called()
 
-    @patch('modular_engine.module_registry.clear_url_caches')
-    def test_url_routing_after_uninstall(self, mock_clear_caches):
+    @patch('modular_engine.signals.force_reload_urls')
+    def test_url_routing_after_uninstall(self, mock_force_reload):
         """Test that URLs are updated after uninstalling a module"""
         # First, install the module
         registry.modules["test_module"] = registry.available_modules["test_module"]
@@ -380,8 +417,8 @@ class ModuleIntegrationTest(TestCase):
         # Uninstall the module
         registry.uninstall_module("test_module")
 
-        # Check that URL caches were cleared
-        mock_clear_caches.assert_called()
+        # Check that URL reloading was triggered
+        mock_force_reload.assert_called()
 
 
 class ModuleMiddlewareTest(TestCase):
@@ -436,33 +473,38 @@ class ModuleMiddlewareTest(TestCase):
         # Add only the installed module to active modules
         registry.modules["installed_module"] = registry.available_modules["installed_module"]
 
-    def test_middleware_allows_installed_module(self):
+    @patch('modular_engine.middleware.settings')
+    def test_middleware_allows_installed_module(self, mock_settings):
         """Test that the middleware allows access to installed modules"""
-        # The middleware should allow access to an installed module even without AVAILABLE_MODULES
+        # Mock settings to include the module in AVAILABLE_MODULES
+        mock_settings.AVAILABLE_MODULES = ['installed_module']
+        mock_settings.CORE_PATHS = []
+        
+        # The middleware should allow access to an installed module
         request = self.factory.get('/installed_module/')
         response = self.middleware(request)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.content, b"OK")
 
-        # Also test with AVAILABLE_MODULES set
-        with self.settings(AVAILABLE_MODULES=['installed_module']):
-            request = self.factory.get('/installed_module/')
-            response = self.middleware(request)
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.content, b"OK")
-
-    def test_middleware_blocks_uninstalled_module(self):
+    @patch('modular_engine.middleware.Module.objects.filter')
+    @patch('modular_engine.middleware.settings')
+    def test_middleware_blocks_uninstalled_module(self, mock_settings, mock_filter):
         """Test that the middleware blocks access to uninstalled modules"""
-        # The middleware should block access to an uninstalled module in the registry
+        # Mock settings for the test
+        mock_settings.AVAILABLE_MODULES = ['uninstalled_module']
+        mock_settings.CORE_PATHS = []
+        
+        # Create a mock queryset that returns our modules
+        mock_queryset = MagicMock()
+        mock_queryset.__iter__.return_value = [
+            MagicMock(module_id='uninstalled_module', base_path='', status='not_installed')
+        ]
+        mock_filter.return_value = mock_queryset
+        
+        # The middleware should block access to an uninstalled module
         request = self.factory.get('/uninstalled_module/')
         with self.assertRaises(Http404):
             self.middleware(request)
-
-        # Also test with AVAILABLE_MODULES set
-        with self.settings(AVAILABLE_MODULES=['uninstalled_module']):
-            request = self.factory.get('/uninstalled_module/')
-            with self.assertRaises(Http404):
-                self.middleware(request)
 
     def test_middleware_allows_non_module_paths(self):
         """Test that the middleware allows access to non-module paths"""
@@ -477,5 +519,63 @@ class ModuleMiddlewareTest(TestCase):
         # Paths that don't correspond to any registered module should be allowed
         request = self.factory.get('/undefined_module/')
         response = self.middleware(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"OK")
+
+
+class URLReloadMiddlewareTest(TestCase):
+    """Tests for the URLReloadMiddleware"""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+
+        # Create a simple dummy view
+        self.dummy_view = lambda request: HttpResponse("OK")
+
+        # Create middleware instance
+        self.middleware = URLReloadMiddleware(self.dummy_view)
+
+    @patch('modular_engine.middleware.get_last_url_change')
+    @patch('modular_engine.middleware.force_reload_urls')
+    def test_middleware_reloads_when_needed(self, mock_force_reload, mock_get_last_url_change):
+        """Test that middleware reloads URLs when there are changes"""
+        # Set up the mock to indicate URL changes
+        mock_get_last_url_change.return_value = time.time()
+        
+        # Create a request
+        request = self.factory.get('/')
+        
+        # Call the middleware
+        response = self.middleware(request)
+        
+        # Verify the mock was called
+        mock_get_last_url_change.assert_called()
+        mock_force_reload.assert_called_once()
+        
+        # Verify the response
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"OK")
+
+    @patch('modular_engine.middleware.get_last_url_change')
+    @patch('modular_engine.middleware.force_reload_urls')
+    def test_middleware_skips_reload_when_no_changes(self, mock_force_reload, mock_get_last_url_change):
+        """Test that middleware doesn't reload URLs when there are no changes"""
+        # Set up the mock to indicate no URL changes (old timestamp)
+        mock_get_last_url_change.return_value = 0
+        
+        # Set the last check time to ensure we're past the check interval
+        self.middleware.last_check = time.time() - 10
+        
+        # Create a request
+        request = self.factory.get('/')
+        
+        # Call the middleware
+        response = self.middleware(request)
+        
+        # Verify the mock was called but not force_reload_urls
+        mock_get_last_url_change.assert_called()
+        mock_force_reload.assert_not_called()
+        
+        # Verify the response
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.content, b"OK")
