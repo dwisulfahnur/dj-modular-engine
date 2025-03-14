@@ -1,7 +1,7 @@
 import logging
 import importlib
 from django.conf import settings
-from django.urls import clear_url_caches, include, path, get_resolver
+from django.urls import clear_url_caches, include, path, get_resolver, set_urlconf
 from django.utils import timezone
 from django.db import connection
 from django.db import DatabaseError
@@ -29,9 +29,8 @@ class ModuleRegistry:
             'url_patterns': url_patterns,
         }
         
-        # Mark that URLs may have changed
-        from modular_engine.signals import mark_urls_changed
-        mark_urls_changed()
+        # Just clear URL caches instead of using signals
+        clear_url_caches()
 
     def install_module(self, module_id, base_path=None):
         """Install a module and mark it as installed in the database"""
@@ -88,15 +87,10 @@ class ModuleRegistry:
         # Add module to active modules
         self.modules[module_id] = module_info
 
-        # If base_path was provided and changed, send the signal
+        # If base_path was provided and changed, reload URLs directly
         if base_path is not None and base_path != old_path:
-            from modular_engine.signals import module_path_changed
-            module_path_changed.send(
-                sender=self.__class__,
-                module_id=module_id,
-                old_path=old_path,
-                new_path=base_path
-            )
+            logger.info(f"Module path changed for {module_id} from '{old_path}' to '{base_path}'")
+            self._reload_urls()
 
         # Reload URLs
         self._reload_urls()
@@ -186,14 +180,11 @@ class ModuleRegistry:
             module.base_path = new_base_path
             module.save()
             
-            # Use signal to notify that the module path has changed
-            from modular_engine.signals import module_path_changed
-            module_path_changed.send(
-                sender=self.__class__, 
-                module_id=module_id, 
-                old_path=old_path, 
-                new_path=new_base_path
-            )
+            # Directly reload URLs instead of using signals
+            self._reload_urls()
+            
+            # Log the path change
+            logger.info(f"Updated module path for {module_id} from '{old_path}' to '{new_base_path}'")
             
             # Call reload_urls for backward compatibility
             self._reload_urls()
@@ -249,9 +240,19 @@ class ModuleRegistry:
 
     def _reload_urls(self):
         """Reload URLs to include active modules"""
-        # Use our more robust URL reloading mechanism
-        from modular_engine.signals import force_reload_urls
-        force_reload_urls()
+        # Clear URL caches directly instead of using signals
+        clear_url_caches()
+        
+        # Reset the URLconf for the current thread
+        set_urlconf(None)
+        
+        # Reload main URLconf module if needed
+        if hasattr(settings, 'ROOT_URLCONF'):
+            import sys
+            import importlib
+            urlconf = settings.ROOT_URLCONF
+            if urlconf in sys.modules:
+                importlib.reload(sys.modules[urlconf])
 
 
 # Singleton instance of the registry

@@ -13,9 +13,6 @@ class ModularEngineConfig(AppConfig):
         if 'makemigrations' in sys.argv or 'migrate' in sys.argv:
             return
             
-        # Import signals to register signal handlers
-        import modular_engine.signals
-            
         # Import here to avoid circular imports
         from modular_engine.module_registry import initialize_module_registry
         initialize_module_registry()

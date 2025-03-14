@@ -1,64 +1,30 @@
 from django.http import Http404
 from django.conf import settings
 from modular_engine.models import Module
-from modular_engine.signals import get_last_url_change, force_reload_urls
 import time
 
 
-class URLReloadMiddleware:
+class ModularEngineMiddleware:
     """
-    Middleware that checks if URL patterns need to be reloaded.
-    
-    This middleware monitors for URL configuration changes and reloads them when needed.
-    It works by comparing timestamps of when URLs were last changed.
-    """
-    
-    def __init__(self, get_response):
-        self.get_response = get_response
-        self.last_check = 0
-        self.check_interval = getattr(settings, 'URL_RELOAD_CHECK_INTERVAL', 2)  # in seconds
-        
-    def __call__(self, request):
-        # Only check periodically to avoid performance impact
-        current_time = time.time()
-        if current_time - self.last_check > self.check_interval:
-            self.last_check = current_time
-            
-            # Get last URL change timestamp
-            last_change = get_last_url_change()
-            
-            # If URLs have been changed since we last loaded them
-            if last_change > self.last_check - self.check_interval:
-                # Force reload
-                force_reload_urls()
-        
-        # Continue with request processing
-        return self.get_response(request)
+    Combined middleware for Django Modular Engine that handles:
+    1. Module URL access control based on installation status
 
+    Notes:
+    - URLs will only be reloaded manually via the module list page button
+    - Or when modules are installed/uninstalled/updated
 
-class ModuleURLMiddleware:
-    """
-    Middleware to control URL access based on module registration and installation status.
-
-    This middleware enforces two levels of security:
-    1. Check if the module is in AVAILABLE_MODULES (if defined in settings)
-       - If not in AVAILABLE_MODULES, proceed with registry checks
-    2. Check if the module is registered and installed
-       - If registered but not installed, return 404
-
-    This ensures that:
-    - Modules explicitly listed in AVAILABLE_MODULES are properly checked
-    - Modules in the registry are always checked for installation status
-    - Paths not matching any module pattern proceed normally
+    This middleware focuses on performance by:
+    - Caching module information to reduce database queries
+    - Only handling necessary module access control
     """
 
     def __init__(self, get_response):
         self.get_response = get_response
 
-        # Keep a list of allowed core paths that bypass module checks
+        # Module access control settings
         self.core_paths = ['admin', 'module', 'static', 'media']
 
-        # Add additional paths from settings if defined
+        # Add additional core paths from settings if defined
         if hasattr(settings, 'CORE_PATHS'):
             self.core_paths.extend(settings.CORE_PATHS)
 
@@ -66,23 +32,66 @@ class ModuleURLMiddleware:
         # Get the path without the leading slash
         path = request.path.lstrip('/')
 
-        # Extract the first segment of the path
-        if '/' in path:
-            first_segment = path.split('/')[0]
-        else:
-            first_segment = path
-
-        # Skip if this is a core path that should bypass module checks
-        if first_segment in self.core_paths:
+        # Check if the path starts with 'modular_engine'
+        if not path.startswith('modular_engine'):
+            # If not, bypass this middleware
             return self.get_response(request)
 
-        # Get all installed modules and their paths
+        # === STEP 2: Apply module URL access control ===
+        # For paths that start with 'modular_engine', extract the second segment
+        path_segments = path.split('/')
+        
+        # We need at least two segments (modular_engine/module_name)
+        if len(path_segments) < 2:
+            return self.get_response(request)
+            
+        # The second segment is the module name
+        module_segment = path_segments[1]
+        
+        # Skip if this is a core path that should bypass module checks
+        if module_segment in self.core_paths:
+            return self.get_response(request)
+
+        # Get installed modules directly from the database
+        installed_modules = self.get_installed_modules()
+
+        # Determine which module this request is for based on the path
+        target_module_id = None
+
+        # Check if this module segment maps to an installed module
+        if module_segment in installed_modules:
+            target_module_id = installed_modules[module_segment]
+
+        # If we've identified a module, check if it's accessible
+        if target_module_id:
+            # If AVAILABLE_MODULES is defined in settings, check if this module is allowed
+            if hasattr(settings, 'AVAILABLE_MODULES'):
+                if target_module_id not in settings.AVAILABLE_MODULES:
+                    raise Http404(
+                        f"Module '{target_module_id}' is not available")
+
+            # Check if the module is installed
+            try:
+                module = Module.objects.get(module_id=target_module_id)
+                if module.status != 'installed':
+                    raise Http404(
+                        f"Module '{target_module_id}' is not installed")
+            except Module.DoesNotExist:
+                raise Http404(f"Module '{target_module_id}' does not exist")
+
+        # Continue with the request
+        return self.get_response(request)
+
+    def get_installed_modules(self):
+        """
+        Get a mapping of base paths to module IDs for all installed modules.
+        """
         installed_modules = {}
 
         try:
             # Query all installed modules
             modules = Module.objects.filter(status='installed')
-            
+
             # Create a mapping of paths to module_ids
             for module in modules:
                 if module.base_path == '/':
@@ -93,33 +102,7 @@ class ModuleURLMiddleware:
                     path_key = module.base_path if module.base_path else module.module_id
                     installed_modules[path_key] = module.module_id
         except:
-            # If there's an error (e.g., table doesn't exist), continue
+            # If there's an error (e.g., table doesn't exist), return empty dict
             pass
 
-        # Determine which module this request is for based on the path
-        target_module_id = None
-
-        # Check if the path is for the root module
-        if first_segment == '' and '' in installed_modules:
-            target_module_id = installed_modules['']
-        elif first_segment in installed_modules:
-            target_module_id = installed_modules[first_segment]
-
-        # If we've identified a module, check if it's accessible
-        if target_module_id:
-            # If AVAILABLE_MODULES is defined in settings, check if this module is allowed
-            if hasattr(settings, 'AVAILABLE_MODULES'):
-                if target_module_id not in settings.AVAILABLE_MODULES:
-                    # Module is not in AVAILABLE_MODULES, so access is denied
-                    raise Http404(f"Module '{target_module_id}' is not available")
-
-            # Check if the module is installed
-            try:
-                module = Module.objects.get(module_id=target_module_id)
-                if module.status != 'installed':
-                    raise Http404(f"Module '{target_module_id}' is not installed")
-            except Module.DoesNotExist:
-                raise Http404(f"Module '{target_module_id}' does not exist")
-
-        # Continue with the request
-        return self.get_response(request)
+        return installed_modules
